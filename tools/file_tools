@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+
+import sys
+#import crypt
+import binascii
+import struct
+
+from common_backup_utils import ConfigFile, BackupUtils, CryptoUtils
+
+def encrypt_tool(in_path, out_path):
+    ptf = open(in_path, "rb")
+    ctf = open(out_path, "wb")
+
+    print("Enter password:")
+    password = input()
+    print("Enter password again:")
+    password2 = input()
+    if password != password2:
+        print("Passwords don't match")
+        return
+
+    key = CryptoUtils.deriveKey(password, binascii.unhexlify("aabbccddeeff"))
+
+    while True:
+        pt_data = ptf.read(CryptoUtils.chunkSize)
+
+        if len(pt_data) == 0:
+            break
+
+        ct_data = CryptoUtils.encryptBytes(key, pt_data)
+
+        len_chunk_data = struct.pack(">I", len(ct_data))
+
+        ctf.write(len_chunk_data)
+        ctf.write(ct_data)
+
+    ptf.close()
+    ctf.close()
+
+def decrypt_tool(in_path, out_path):
+    ctf = open(in_path, "rb")
+    ptf = open(out_path, "wb")
+
+    print("Enter password:")
+    password = input()
+    key = CryptoUtils.deriveKey(password, binascii.unhexlify("aabbccddeeff"))
+
+    while True:
+        len_chunk_data_bytes = ctf.read(4)
+        if len(len_chunk_data_bytes) != 4:
+            break
+        len_chunk_data = struct.unpack(">I", len_chunk_data_bytes)[0]
+        print(f"Encrypted chunk = {len_chunk_data}")
+
+        ct_data = ctf.read(len_chunk_data)
+        
+        pt_data = CryptoUtils.decryptBytes(key, ct_data)
+
+        ptf.write(pt_data)
+
+        if len(pt_data) == 0:
+            break
+
+    ptf.close()
+    ctf.close()
+
+
+def print_usage(self_name):
+    print(f"Usage {self_name} tool infile outfile")
+    print("")
+ 
+
+
+
+def main(args):
+    if len(args) != 4:
+        print_usage(sys.argv[0])
+        return
+
+    tool_name = args[1]
+    in_path = args[2]
+    out_path = args[3]
+
+    if tool_name == "encrypt":
+        encrypt_tool(in_path, out_path)
+    elif tool_name == "decrypt":
+        decrypt_tool(in_path, out_path)
+    else:
+        print_usage(sys.argv[0])
+       
+
+if __name__ == "__main__":
+    main(sys.argv)
