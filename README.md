@@ -69,6 +69,8 @@ Config file will be a list of key/value pairs
 * LOCAL_INDEX_PATH: path where we should store index files
 * LOCAL_PATH_TO_BACKUP: path to the files locally we want backed up
 
+@todo Make port customizable
+
 # Backup utilities
 
 * create_backup_index config_file

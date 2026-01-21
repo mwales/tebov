@@ -4,19 +4,29 @@ import sys
 #import crypt
 import binascii
 import struct
+import bz2
+import re
+import paramiko
 
 from common_backup_utils import ConfigFile, BackupUtils, CryptoUtils
 
-def encrypt_tool(in_path, out_path):
-    ptf = open(in_path, "rb")
-    ctf = open(out_path, "wb")
-
+def password_double_prompt():
     print("Enter password:")
     password = input()
     print("Enter password again:")
     password2 = input()
     if password != password2:
         print("Passwords don't match")
+        return None
+    return password
+
+
+def encrypt_tool(in_path, out_path):
+    ptf = open(in_path, "rb")
+    ctf = open(out_path, "wb")
+
+    password = password_double_prompt()
+    if not password:
         return
 
     key = CryptoUtils.deriveKey(password, binascii.unhexlify("aabbccddeeff"))
@@ -28,6 +38,7 @@ def encrypt_tool(in_path, out_path):
             break
 
         ct_data = CryptoUtils.encryptBytes(key, pt_data)
+        print(f"Encrypting a chunk of size {len(pt_data)} down to {len(ct_data)}")
 
         len_chunk_data = struct.pack(">I", len(ct_data))
 
@@ -64,29 +75,125 @@ def decrypt_tool(in_path, out_path):
     ptf.close()
     ctf.close()
 
+def compress_tool(in_path, out_path):
+    in_file = open(in_path, "rb")
+    out_file = open(out_path, "wb")
+    
+    compressor = bz2.BZ2Compressor()
 
-def print_usage(self_name):
+    chunk_size = 16 * 1024 * 1024
+
+    br = [ 0 ]
+    uncompress_size = 0
+    compress_size = 0
+    while len(br) > 0:
+        br = in_file.read(chunk_size)
+        uncompress_size += len(br)
+
+        bc = compressor.compress(br)
+        compress_size += len(bc)
+        out_file.write(bc)
+
+    bc = compressor.flush()
+    compress_size += len(bc)
+
+    out_file.write(bc)
+    in_file.close()
+    out_file.close()
+    print(f"Compressed {in_path} from {uncompress_size} down to {compress_size} in {out_path}")
+
+
+def decompress_tool(in_path, out_path):
+    in_file = open(in_path, "rb")
+    out_file = open(out_path, "wb")
+    
+    decompressor = bz2.BZ2Decompressor()
+
+    chunk_size = 16 * 1024 * 1024
+
+    br = [ 0 ]
+    compress_size = 0
+    uncompress_size = 0
+    while len(br) > 0:
+        br = in_file.read(chunk_size)
+        compress_size += len(br)
+
+        if len(br) <= 0:
+            break
+
+        bc = decompressor.decompress(br)
+        uncompress_size += len(bc)
+        out_file.write(bc)
+
+    in_file.close()
+    out_file.close()
+    print(f"Decompressed {in_path} from {compress_size} down to {uncompress_size} in {out_path}")
+
+def parse_remote(s: str):
+    """ Returns a tuple that is ( user, host, path ) """
+    REMOTE_RE = re.compile(r'^([^@]+)@([^:]+):(.+)$')
+    m = REMOTE_RE.match(s)
+    if not m:
+        raise ValueError(f"Invalid remote path: {s!r}")
+
+    return ( m.group(1), m.group(2), m.group(3) )
+
+def compress_crypt_send(in_file, out_file):
+
+    password = password_double_prompt()
+    if not password:
+        return
+
+    username, hostname, path = parse_remote(out_file)
+
+    salt = binascii.unhexlify("aabbccddeeff")
+
+    key = CryptoUtils.deriveKey(password, salt)
+
+    ssh_sess, sftp_client = CryptoUtils.start_sftp(hostname, username)
+
+
+    hashdigest, br, bw = CryptoUtils.compress_crypt_txfer(in_file, key, sftp_client, path)
+
+    sftp_client.close()
+    ssh_sess.close()
+   
+    print(f"Compressed {br} bytes down into {bw}, encrypted file hash = {hashdigest.hex()}")
+
+
+def print_usage(self_name, tool_list):
     print(f"Usage {self_name} tool infile outfile")
+
+    for tool, _, tool_help in tool_list:
+        print(f"    {tool}: {tool_help}")
     print("")
  
 
 
 
 def main(args):
+
+    tool_list = [ ( "encrypt", encrypt_tool, "Encrypt a file using AES-SIV" ),
+                  ( "decrypt", decrypt_tool, "Decrypt a file using AES-SIV" ),
+                  ( "compress", compress_tool, "Compress a file using bzip compression" ),
+                  ( "decompress", decompress_tool, "Decompress a file using bzip compression"),
+                  ( "compress_crypt_send", compress_crypt_send, "Compress, crypt, and send" ) ] 
+
     if len(args) != 4:
-        print_usage(sys.argv[0])
+        print_usage(sys.argv[0], tool_list)
         return
 
     tool_name = args[1]
     in_path = args[2]
     out_path = args[3]
 
-    if tool_name == "encrypt":
-        encrypt_tool(in_path, out_path)
-    elif tool_name == "decrypt":
-        decrypt_tool(in_path, out_path)
+
+    for tool, tool_func, _ in tool_list:
+        if tool == tool_name:
+            tool_func(in_path, out_path)
+            return 0
     else:
-        print_usage(sys.argv[0])
+        print_usage(sys.argv[0], tool_list)
        
 
 if __name__ == "__main__":

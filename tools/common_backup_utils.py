@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import sys
-#import crypt
 import os
 import logging
-import paramiko
+import paramiko # apt-get install python3-paramiko
+import bz2
+import struct
 
+# apt-get install python3-pycryptodome
 from Cryptodome.Hash import SHA256
 from Cryptodome.Protocol.KDF import scrypt
 from Cryptodome.Cipher import AES
@@ -79,6 +81,16 @@ class CryptoUtils:
     chunkSize = 16 * 1024 * 1024 # 16MB
 
     @classmethod
+    def start_sftp(cls, hostname, username):
+        ssh = paramiko.SSHClient()
+        ssh.load_system_host_keys()
+        ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+        ssh.connect(hostname=hostname, username=username)
+        sftp = ssh.open_sftp()
+        return ssh, sftp
+
+
+    @classmethod
     def calc_file_hash(cls, filename):
         hash_ctx = SHA256.new()
 
@@ -114,9 +126,85 @@ class CryptoUtils:
         ctx = AES.new(key, AES.MODE_SIV)
         pt = ctx.decrypt_and_verify(inbytes[16:], tag)
         return pt
+
+    @classmethod
+    def compress_crypt_txfer(cls, in_path, key, sftp_client, folder):
+        input_file = open(in_path, "rb")
+
+        output_file = sftp_client.open(folder + "/" + "txfer_in_progress", "wb")
+        
+        compressor = bz2.BZ2Compressor()
+        hash_ctx = SHA256.new()
+
+        total_bytes_read = 0
+        total_bytes_written = 0
+        compressed_data = bytes()
+        while True: 
+            chunk = input_file.read(CryptoUtils.chunkSize)
+
+            if len(chunk) <= 0:
+                break
+
+            total_bytes_read += len(chunk)
+            compressed_data += compressor.compress(chunk)
+
+            if len(compressed_data) < CryptoUtils.chunkSize:
+                # Want to feed the crypto chunkSize blocks, compress more until
+                # we get to a full chunk size
+                continue
+
+            if len(compressed_data) > CryptoUtils.chunkSize:
+                ct = CryptoUtils.encryptBytes(key, compressed_data[:CryptoUtils.chunkSize])
+                compressed_data = compressed_data[CryptoUtils.chunkSize:]
+            else:
+                ct = CryptoUtils.encryptBytes(key, compressed_data)
+                compressed_data = bytes()
+
+            len_bytes = struct.pack(">I", len(ct))
+
+            output_file.write(len_bytes + ct)
+            hash_ctx.update(len_bytes + ct)
+
+            total_bytes_written += len(ct) + 4
+
+        # Edge case, empty file
+        if total_bytes_read == 0:
+            # File was empty to begin with, just ignore
+            input_file.close()
+            output_file.close()
+
+            return None, 0, 0
+
+        input_file.close()
+
+        compressed_data += compressor.flush()
+        while len(compressed_data) > 0:
     
+            if len(compressed_data) > CryptoUtils.chunkSize:
+                ct = CryptoUtils.encryptBytes(key, compressed_data[:CryptoUtils.chunkSize])
+                compressed_data = compressed_data[CryptoUtils.chunkSize:]
+            else:
+                ct = CryptoUtils.encryptBytes(key, compressed_data)
+                compressed_data = bytes()
+
+            len_bytes = struct.pack(">I", len(ct))
+
+            output_file.write(len_bytes + ct)
+            hash_ctx.update(len_bytes + ct)
+
+            total_bytes_written += len(ct) + 4
+
+        output_file.close()
+
+        hash_value = hash_ctx.digest()
+
+        return hash_value, total_bytes_read, total_bytes_written
 
 
+
+
+
+    
 
     #@classmethod
     #def encyrptFileAndSend(cls, localfilename: str, crypt_pass: str, server: str, username: str, destpath: str) -> Tuple [ Boolean, bytes ]:
