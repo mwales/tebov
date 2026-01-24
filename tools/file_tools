@@ -7,6 +7,8 @@ import struct
 import bz2
 import re
 import paramiko
+import logging
+import stat
 
 from common_backup_utils import ConfigFile, BackupUtils, CryptoUtils
 
@@ -160,6 +162,29 @@ def compress_crypt_send(in_file, out_file):
    
     print(f"Compressed {br} bytes down into {bw}, encrypted file hash = {hashdigest.hex()}")
 
+def verify_file_backed_up(in_file, out_file):
+    password = password_double_prompt()
+    if not password:
+        return
+
+    key = CryptoUtils.deriveKey(password, binascii.unhexlify("aabbccddeeff"))
+    hash_val = CryptoUtils.compute_compress_crypt_hash(in_file, key)
+    username, hostname, path = parse_remote(out_file)
+
+    folder, filename = CryptoUtils.hash_to_filepath(path, hash_val)
+
+    ssh_sess, sftp_client = CryptoUtils.start_sftp(hostname, username)
+
+    
+    try:
+        st = sftp_client.stat(folder + "/" + filename)
+        if stat.S_ISREG(st.st_mode):
+            print(f"Local file {in_file} exists as {folder}/{filename} on remote system")
+    except IOError as e:
+        print(f"Local file {in_file} is NOT on remote system")
+        print(f"Should exist at {folder}/{filename}")
+
+    sftp_client.close()
 
 def print_usage(self_name, tool_list):
     print(f"Usage {self_name} tool infile outfile")
@@ -172,12 +197,15 @@ def print_usage(self_name, tool_list):
 
 
 def main(args):
+    logging.basicConfig(level=logging.DEBUG)
 
     tool_list = [ ( "encrypt", encrypt_tool, "Encrypt a file using AES-SIV" ),
                   ( "decrypt", decrypt_tool, "Decrypt a file using AES-SIV" ),
                   ( "compress", compress_tool, "Compress a file using bzip compression" ),
                   ( "decompress", decompress_tool, "Decompress a file using bzip compression"),
-                  ( "compress_crypt_send", compress_crypt_send, "Compress, crypt, and send" ) ] 
+                  ( "compress_crypt_send", compress_crypt_send, "Compress, crypt, and send" ),
+                  ( "verify_file_backed_up", verify_file_backed_up, "Verify the presence of backup file on server") ] 
+
 
     if len(args) != 4:
         print_usage(sys.argv[0], tool_list)
