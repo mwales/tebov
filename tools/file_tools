@@ -10,7 +10,7 @@ import paramiko
 import logging
 import stat
 
-from common_backup_utils import ConfigFile, BackupUtils, CryptoUtils
+from common_backup_utils import ConfigFile, BackupUtils, CryptoUtils, RemoteServer
 
 def password_double_prompt():
     print("Enter password:")
@@ -31,7 +31,7 @@ def encrypt_tool(in_path, out_path):
     if not password:
         return
 
-    key = CryptoUtils.deriveKey(password, binascii.unhexlify("aabbccddeeff"))
+    key = CryptoUtils.deriveKey(password)
 
     while True:
         pt_data = ptf.read(CryptoUtils.chunkSize)
@@ -56,7 +56,7 @@ def decrypt_tool(in_path, out_path):
 
     print("Enter password:")
     password = input()
-    key = CryptoUtils.deriveKey(password, binascii.unhexlify("aabbccddeeff"))
+    key = CryptoUtils.deriveKey(password)
 
     while True:
         len_chunk_data_bytes = ctf.read(4)
@@ -148,43 +148,38 @@ def compress_crypt_send(in_file, out_file):
 
     username, hostname, path = parse_remote(out_file)
 
-    salt = binascii.unhexlify("aabbccddeeff")
+    key = CryptoUtils.deriveKey(password)
 
-    key = CryptoUtils.deriveKey(password, salt)
+    rs = RemoteServer(hostname, username, path)
 
-    ssh_sess, sftp_client = CryptoUtils.start_sftp(hostname, username)
+    hashdigest, br, bw = rs.compress_crypt_txfer(key, in_file)
 
+    rs.close()
 
-    hashdigest, br, bw = CryptoUtils.compress_crypt_txfer(in_file, key, sftp_client, path)
-
-    sftp_client.close()
-    ssh_sess.close()
-   
     print(f"Compressed {br} bytes down into {bw}, encrypted file hash = {hashdigest.hex()}")
 
 def verify_file_backed_up(in_file, out_file):
-    password = password_double_prompt()
-    if not password:
-        return
-
-    key = CryptoUtils.deriveKey(password, binascii.unhexlify("aabbccddeeff"))
-    hash_val = CryptoUtils.compute_compress_crypt_hash(in_file, key)
+    print("Enter password:")
+    password = input()
+ 
+    key = CryptoUtils.deriveKey(password)
+    hash_val, file_len = CryptoUtils.compute_compress_crypt_hash(in_file, key)
+    
     username, hostname, path = parse_remote(out_file)
 
-    folder, filename = CryptoUtils.hash_to_filepath(path, hash_val)
+    folder, filename = RemoteServer.hash_to_filepath(hash_val)
 
-    ssh_sess, sftp_client = CryptoUtils.start_sftp(hostname, username)
+    rs = RemoteServer(hostname, username, path)
 
-    
-    try:
-        st = sftp_client.stat(folder + "/" + filename)
-        if stat.S_ISREG(st.st_mode):
-            print(f"Local file {in_file} exists as {folder}/{filename} on remote system")
-    except IOError as e:
+    remote_size = rs.get_remote_file_size(folder + "/" + filename)
+   
+    rs.close()
+
+    if remote_size != 0 and remote_size == file_len:
+        print(f"Local file {in_file} exists as {folder}/{filename} on remote system")
+    else:
         print(f"Local file {in_file} is NOT on remote system")
         print(f"Should exist at {folder}/{filename}")
-
-    sftp_client.close()
 
 def print_usage(self_name, tool_list):
     print(f"Usage {self_name} tool infile outfile")
