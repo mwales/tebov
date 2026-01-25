@@ -63,7 +63,7 @@ def decrypt_tool(in_path, out_path):
         if len(len_chunk_data_bytes) != 4:
             break
         len_chunk_data = struct.unpack(">I", len_chunk_data_bytes)[0]
-        print(f"Encrypted chunk = {len_chunk_data}")
+        print(f"Decrypted chunk = {len_chunk_data}")
 
         ct_data = ctf.read(len_chunk_data)
         
@@ -129,7 +129,7 @@ def decompress_tool(in_path, out_path):
 
     in_file.close()
     out_file.close()
-    print(f"Decompressed {in_path} from {compress_size} down to {uncompress_size} in {out_path}")
+    print(f"Decompressed {in_path} from {compress_size} up to {uncompress_size} in {out_path}")
 
 def parse_remote(s: str):
     """ Returns a tuple that is ( user, host, path ) """

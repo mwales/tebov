@@ -189,6 +189,135 @@ class CryptoUtils:
         hash_value = hash_ctx.digest()
         return hash_value, final_size
 
+    @classmethod
+    def compress_encrypt_file(cld, key: bytes, input_file, output_file):
+        """
+        Reads the input file, compresses it, and then encrypts it before
+        writing.  Returns the hash of the cipher text, read size, and
+        number of bytes written
+        """
+
+        compressor = bz2.BZ2Compressor()
+        hash_ctx = SHA256.new()
+
+        total_bytes_read = 0
+        total_bytes_written = 0
+        compressed_data = bytes()
+        while True: 
+            chunk = input_file.read(CryptoUtils.chunkSize)
+
+            if len(chunk) <= 0:
+                break
+
+            total_bytes_read += len(chunk)
+            compressed_data += compressor.compress(chunk)
+
+            if len(compressed_data) < CryptoUtils.chunkSize:
+                # Want to feed the crypto chunkSize blocks, compress more until
+                # we get to a full chunk size
+                continue
+
+            if len(compressed_data) > CryptoUtils.chunkSize:
+                ct = CryptoUtils.encryptBytes(key, compressed_data[:CryptoUtils.chunkSize])
+                compressed_data = compressed_data[CryptoUtils.chunkSize:]
+            else:
+                ct = CryptoUtils.encryptBytes(key, compressed_data)
+                compressed_data = bytes()
+
+            len_bytes = struct.pack(">I", len(ct))
+
+            output_file.write(len_bytes + ct)
+            hash_ctx.update(len_bytes + ct)
+
+            total_bytes_written += len(ct) + 4
+
+        # Edge case, empty file
+        if total_bytes_read == 0:
+            # File was empty to begin with, just ignore
+            input_file.close()
+            output_file.close()
+
+            return None, 0, 0
+
+        input_file.close()
+
+        compressed_data += compressor.flush()
+        while len(compressed_data) > 0:
+    
+            if len(compressed_data) > CryptoUtils.chunkSize:
+                ct = CryptoUtils.encryptBytes(key, compressed_data[:CryptoUtils.chunkSize])
+                compressed_data = compressed_data[CryptoUtils.chunkSize:]
+            else:
+                ct = CryptoUtils.encryptBytes(key, compressed_data)
+                compressed_data = bytes()
+
+            len_bytes = struct.pack(">I", len(ct))
+
+            output_file.write(len_bytes + ct)
+            hash_ctx.update(len_bytes + ct)
+
+            total_bytes_written += len(ct) + 4
+
+        output_file.close()
+
+        hash_value = hash_ctx.digest()
+        return hash_value, total_bytes_read, total_bytes_written
+
+    @classmethod
+    def encrypt_file(cls, key, input_file, output_file):
+        hash_ctx = SHA256.new()
+
+        total_bytes_read = 0
+        total_bytes_written = 0
+        compressed_data = bytes()
+        while True: 
+            chunk = input_file.read(CryptoUtils.chunkSize)
+
+            if len(chunk) <= 0:
+                break
+
+            total_bytes_read += len(chunk)
+            ct = CryptoUtils.encryptBytes(key, compressed_data)
+
+            len_bytes = struct.pack(">I", len(ct))
+
+            output_file.write(len_bytes + ct)
+            hash_ctx.update(len_bytes + ct)
+
+            total_bytes_written += len(ct) + 4
+
+        # Edge case, empty file
+        if total_bytes_read == 0:
+            # File was empty to begin with, just ignore
+            input_file.close()
+            output_file.close()
+
+            return None, 0, 0
+
+        input_file.close()
+
+        compressed_data += compressor.flush()
+        while len(compressed_data) > 0:
+    
+            if len(compressed_data) > CryptoUtils.chunkSize:
+                ct = CryptoUtils.encryptBytes(key, compressed_data[:CryptoUtils.chunkSize])
+                compressed_data = compressed_data[CryptoUtils.chunkSize:]
+            else:
+                ct = CryptoUtils.encryptBytes(key, compressed_data)
+                compressed_data = bytes()
+
+            len_bytes = struct.pack(">I", len(ct))
+
+            output_file.write(len_bytes + ct)
+            hash_ctx.update(len_bytes + ct)
+
+            total_bytes_written += len(ct) + 4
+
+        output_file.close()
+        hash_value = hash_ctx.digest()
+        return hash_value, total_bytes_read, total_bytes_written
+
+
 
 
 
@@ -283,71 +412,11 @@ class RemoteServer:
         temp_filename = "txfer_in_progress"
         output_file = self.sftp.open(self.remote_folder + "/" + temp_filename, "wb")
         
-        compressor = bz2.BZ2Compressor()
-        hash_ctx = SHA256.new()
+        hash_value, total_bytes_read, total_bytes_written = CryptoUtils.compress_encrypt_file(key, input_file, output_file)
 
-        total_bytes_read = 0
-        total_bytes_written = 0
-        compressed_data = bytes()
-        while True: 
-            chunk = input_file.read(CryptoUtils.chunkSize)
-
-            if len(chunk) <= 0:
-                break
-
-            total_bytes_read += len(chunk)
-            compressed_data += compressor.compress(chunk)
-
-            if len(compressed_data) < CryptoUtils.chunkSize:
-                # Want to feed the crypto chunkSize blocks, compress more until
-                # we get to a full chunk size
-                continue
-
-            if len(compressed_data) > CryptoUtils.chunkSize:
-                ct = CryptoUtils.encryptBytes(key, compressed_data[:CryptoUtils.chunkSize])
-                compressed_data = compressed_data[CryptoUtils.chunkSize:]
-            else:
-                ct = CryptoUtils.encryptBytes(key, compressed_data)
-                compressed_data = bytes()
-
-            len_bytes = struct.pack(">I", len(ct))
-
-            output_file.write(len_bytes + ct)
-            hash_ctx.update(len_bytes + ct)
-
-            total_bytes_written += len(ct) + 4
-
-        # Edge case, empty file
         if total_bytes_read == 0:
-            # File was empty to begin with, just ignore
-            input_file.close()
-            output_file.close()
-
-            return None, 0, 0
-
-        input_file.close()
-
-        compressed_data += compressor.flush()
-        while len(compressed_data) > 0:
-    
-            if len(compressed_data) > CryptoUtils.chunkSize:
-                ct = CryptoUtils.encryptBytes(key, compressed_data[:CryptoUtils.chunkSize])
-                compressed_data = compressed_data[CryptoUtils.chunkSize:]
-            else:
-                ct = CryptoUtils.encryptBytes(key, compressed_data)
-                compressed_data = bytes()
-
-            len_bytes = struct.pack(">I", len(ct))
-
-            output_file.write(len_bytes + ct)
-            hash_ctx.update(len_bytes + ct)
-
-            total_bytes_written += len(ct) + 4
-
-        output_file.close()
-
-        hash_value = hash_ctx.digest()
-
+            return hash_value, total_bytes_read, total_bytes_written
+       
         backup_folders, final_name = RemoteServer.hash_to_filepath(hash_value)
 
         logging.debug(f"Moving {temp_filename} to {backup_folders}/{final_name}")
@@ -355,6 +424,23 @@ class RemoteServer:
 
         return hash_value, total_bytes_read, total_bytes_written
 
+    def crypt_txfer(self, key: bytes, in_path: str):
+        input_file = open(in_path, "rb")
+
+        temp_filename = "txfer_in_progress"
+        output_file = self.sftp.open(self.remote_folder + "/" + temp_filename, "wb")
+        
+        hash_value, total_bytes_read, total_bytes_written = CryptoUtils.encrypt_file(key, input_file, output_file)
+
+        if total_bytes_read == 0:
+            return hash_value, total_bytes_read, total_bytes_written
+
+        backup_folders, final_name = RemoteServer.hash_to_filepath(hash_value)
+
+        logging.debug(f"Moving {temp_filename} to {backup_folders}/{final_name}")
+        self.move_remote_file_mkpath(temp_filename, backup_folders, final_name)
+
+        return hash_value, total_bytes_read, total_bytes_written
 
 
 if __name__ == "__main__":
