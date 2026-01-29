@@ -32,7 +32,7 @@ def main(args):
         logging.debug(f"{pn}:{hb.hex()}")
 
 
-    bu.backup_files("todays")
+    bu.first_backup("todays")
 
 
 if __name__ == "__main__":

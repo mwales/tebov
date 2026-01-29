@@ -85,6 +85,8 @@ class BackupUtils:
         self.server_remote_folder = self.config.get("BACKUP_SERVER_BACKUP_PATH")
 
         directory_path = self.config.get("LOCAL_PATH_TO_BACKUP")
+        self.local_index_path = self.config.get("LOCAL_INDEX_PATH")
+
         self.backup_path_normal = os.path.normpath(directory_path) + "/"
 
         self.pt_hash_cache: Dict [ bytes, bytes ] = {}
@@ -95,11 +97,24 @@ class BackupUtils:
 
         self.logger = logging.getLogger("BackupUtil")
 
-    def backup_files(self, backup_name):
+    def first_backup(self, backup_name):
+
+        local_index_file = open(os.path.join(self.local_index_path, backup_name + ".index"), "w")
+        local_verify_file = open(os.path.join(self.local_index_path, backup_name + ".verify"), "wb")
+    
+        self.get_file_list()
+        print(f"Identified {len(self.file_list)} files to backup")
+
+        # Write the number of files in the backup to the index and verify file
+        local_index_file.write(f"NUM_FILES={len(self.file_list)}\n")
+        local_verify_file.write(struct.pack(">I", len(self.file_list)))
 
         rs = RemoteServer(self.server_hostname, self.server_username, self.server_remote_folder)
 
         for fn in self.file_list:
+            cur_local_full_path = os.path.join(self.backup_path_normal, fn)
+            local_file_hash = CryptoUtils.calc_local_file_hash(cur_local_full_path)
+
             dontCompress = False
             try:
                 file_ext_start = fn.rindex('.')
@@ -112,10 +127,24 @@ class BackupUtils:
                 pass
 
             if dontCompress:
-                rs.crypt_txfer(self.key, os.path.join(self.backup_path_normal, fn))
+                hash_value, total_bytes_read, total_bytes_written = rs.crypt_txfer(self.key, cur_local_full_path)
             else:
-                rs.compress_crypt_txfer(self.key, os.path.join(self.backup_path_normal, fn))
+                hash_value, total_bytes_read, total_bytes_written = rs.compress_crypt_txfer(self.key, cur_local_full_path)
 
+            index_entry_list = []
+            index_entry_list.append(fn.replace(":", "::"))
+            index_entry_list.append(local_file_hash.hex())
+            index_entry_list.append("N" if dontCompress else "b")
+            index_entry_list.append(hash_value.hex())
+            
+            escaped_filename = fn.replace(":","::")
+            local_index_file.write(":".join(index_entry_list) + "\n")
+            local_verify_file.write(hash_value)
+
+        local_index_file.close()
+        local_verify_file.close()
+
+            
     def get_file_list(self):
         """
         Can't use built in glob stuff because I don't want to follow sym links
