@@ -31,8 +31,9 @@ def main(args):
         hb = CryptoUtils.calc_local_file_hash(full_local_path)
         logging.debug(f"{pn}:{hb.hex()}")
 
+    
 
-    bu.first_backup("todays")
+    bu.first_backup()
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ import paramiko # apt-get install python3-paramiko
 import bz2
 import struct
 import stat
-
+import datetime
+import re
 
 from typing import List, Tuple, Dict, Set
 
@@ -18,14 +19,17 @@ from Cryptodome.Cipher import AES
 
 class ConfigFile:
 
-    required_config: List [ str ] = [ 
-        "BACKUP_SERVER",
-        "BACKUP_SERVER_USER",
-        "BACKUP_SERVER_BACKUP_PATH",
-        "BACKUP_SERVER_INDEX_PATH",
-        "LOCAL_INDEX_PATH",
-        "LOCAL_PATH_TO_BACKUP",
-        "ENCRYPT_PASSWORD" ]
+    required_config: List [ Tuple [ str, str ] ] = [ 
+        ("BACKUP_SERVER", "IP or hostname of the server to SFTP to"),
+        ("BACKUP_SERVER_USER", "Username for SFTP server"),
+        ("BACKUP_SERVER_BACKUP_PATH", "Full path on remote server to store files"),
+        ("LOCAL_INDEX_PATH", "Full local path to store index files (should not be folder in backup path)"),
+        ("LOCAL_PATH_TO_BACKUP", "Full path to folder that should be backed up"),
+        ("ENCRYPT_PASSWORD", "Password to encrypt backups with") ]
+
+    optional_config: List [ Tuple [ str, str ] ] = [
+        ("BACKUP_FILENAME_PREFIX", "Prefix to put on the filename for backups before timestamp"),
+        ("BACKUP_SERVER_REL_INDEX_PATH", "Relative path in the backup folder to store index files") ]
 
     def __init__(self, filepath: str):
         
@@ -41,13 +45,20 @@ class ConfigFile:
             return
 
         for config_line in cfd:
-            tokens = config_line.split("=")
+            # Remove any comment characters
+            no_comments = re.sub(r'\*s#.*$', '', config_line)
+
+            tokens = no_comments.split("=")
             if len(tokens) != 2:
                 continue
+            
             self.config[tokens[0]] = tokens[1]
 
     def is_required_config_available(self) -> bool:
-        reqd = set(ConfigFile.required_config)
+        reqd = set()
+        for name, _ in self.required_config:
+            reqd.add(name)
+        
         present = set(self.config.keys())
 
         missing = reqd - present
@@ -59,13 +70,24 @@ class ConfigFile:
 
     @classmethod
     def print_configuration_sample(cls) -> None:
+        longest_line_len = 0
+        for key, desc in ConfigFile.required_config + ConfigFile.optional_config:
+            longest_line_len = max(len(key), longest_line_len)
+
         print("Sample configuration file contents:")
         print(" ")
-        for key in ConfigFile.required_config:
-            print(f"{key}=VALUE")
+        for key, desc in ConfigFile.required_config:
+            print(f"{key}=VALUE {' ' * (longest_line_len - len(key))}   # {desc}")
+        print("# The following entries are optional")
+        for key, desc in ConfigFile.optional_config:
+            print(f"{key}=VALUE {' ' * (longest_line_len - len(key))}   # {desc}")
 
-    def get(self, key) -> str:
-        return self.config[key]
+
+    def get(self, key, default = None) -> str:
+        if default:
+            return self.config.get(key, default)
+        else:
+            return self.config[key]
 
 class BackupUtils:
    
@@ -83,11 +105,13 @@ class BackupUtils:
         self.server_hostname = self.config.get("BACKUP_SERVER")
         self.server_username = self.config.get("BACKUP_SERVER_USER")
         self.server_remote_folder = self.config.get("BACKUP_SERVER_BACKUP_PATH")
+        self.server_remote_index_folder = self.config.get("BACKUP_SERVER_INDEX_PATH", "/index")
 
         directory_path = self.config.get("LOCAL_PATH_TO_BACKUP")
-        self.local_index_path = self.config.get("LOCAL_INDEX_PATH")
-
         self.backup_path_normal = os.path.normpath(directory_path) + "/"
+        
+        self.local_index_path = self.config.get("LOCAL_INDEX_PATH")
+        self.name_prefix = self.config.get("BACKUP_FILENAME_PREFIX", "backup_")
 
         self.pt_hash_cache: Dict [ bytes, bytes ] = {}
 
@@ -96,11 +120,14 @@ class BackupUtils:
         self.filename_pt_hash: Dict [ str, bytes ]
 
         self.logger = logging.getLogger("BackupUtil")
+        self.timestamp =  datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-    def first_backup(self, backup_name):
+    def first_backup(self):
+        local_index_file_path = os.path.join(self.local_index_path, self.name_prefix + self.timestamp + ".index")
+        local_verify_file_path = os.path.join(self.local_index_path, self.name_prefix + self.timestamp + ".verify")
 
-        local_index_file = open(os.path.join(self.local_index_path, backup_name + ".index"), "w")
-        local_verify_file = open(os.path.join(self.local_index_path, backup_name + ".verify"), "wb")
+        local_index_file = open(local_index_file_path, "w")
+        local_verify_file = open(local_verify_file_path, "wb")
     
         self.get_file_list()
         print(f"Identified {len(self.file_list)} files to backup")
@@ -143,6 +170,15 @@ class BackupUtils:
 
         local_index_file.close()
         local_verify_file.close()
+
+        remote_index_file_path = os.path.join(self.server_remote_index_folder,
+                                              self.name_prefix + self.timestamp + ".index.enc")
+        remote_verify_file_path = os.path.join(self.server_remote_index_folder,
+                                               self.name_prefix + self.timestamp + ".verify")
+
+        rs.make_path(self.server_remote_index_folder)
+        rs.simple_compress_crypt_txfer(self.key, local_index_file_path, remote_index_file_path)
+        rs.simple_txfer(local_verify_file_path, remote_verify_file_path)
 
             
     def get_file_list(self):
@@ -496,6 +532,40 @@ class RemoteServer:
         ratio = round( (total_bytes_read - total_bytes_written) / total_bytes_read * 100.0, 1)
         print(f"Backed up {in_path} [ Compressed {total_bytes_read} to {total_bytes_written} {ratio}% ]")
         return hash_value, total_bytes_read, total_bytes_written
+
+    def simple_compress_crypt_txfer(self, key: bytes, in_path: str, out_path: str):
+        self.logger.debug(f"simple_compress_crypt_txfer {in_path} -> {out_path}")
+        
+        input_file = open(in_path, "rb")
+        
+        full_output_path = self.remote_folder + "/" + out_path
+        self.logger.debug(f"simple_compress_crypt_txfer writing to remote path {full_output_path}")
+        
+        output_file = self.sftp.open(full_output_path, "wb")
+        
+        hash_value, total_bytes_read, total_bytes_written = CryptoUtils.compress_encrypt_file(key, input_file, output_file)
+
+        ratio = round( (total_bytes_read - total_bytes_written) / total_bytes_read * 100.0, 1)
+        print(f"Transfered {in_path} [ Compressed {total_bytes_read} to {total_bytes_written} {ratio}% ]")
+        return hash_value, total_bytes_read, total_bytes_written
+
+    def simple_txfer(self, in_path: str, remote_out_path: str):
+        input_file = open(in_path, "rb")
+        full_output_path = self.remote_folder + "/" + remote_out_path
+        
+        self.logger.debug(f"simple_txfer writing {in_path} to remote full path {full_output_path}")
+        output_file = self.sftp.open(full_output_path, "wb")
+        
+        nb = 0
+        while True:
+            data = input_file.read(4 * 1024)
+            if len(data) <= 0:
+                break
+
+            output_file.write(data)
+            nb += len(data)
+
+        print(f"Transfered {in_path} to {remote_out_path} [ {nb} bytes ]")
 
     def crypt_txfer(self, key: bytes, in_path: str):
         self.logger.debug(f"crypt_txfer {in_path}")

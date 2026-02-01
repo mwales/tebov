@@ -9,6 +9,7 @@ import re
 import paramiko
 import logging
 import stat
+import os
 
 from common_backup_utils import ConfigFile, BackupUtils, CryptoUtils, RemoteServer
 
@@ -181,6 +182,43 @@ def verify_file_backed_up(in_file, out_file):
         print(f"Local file {in_file} is NOT on remote system")
         print(f"Should exist at {folder}/{filename}")
 
+
+def manifest_verify(in_file, out_file):
+    logging.debug(f"Path to backup data = {out_file}")
+    verify_file = open(in_file, "rb")
+    num_entries_len = struct.calcsize(">I")
+    num_entries_bytes = verify_file.read(num_entries_len)
+    num_entries = struct.unpack(">I", num_entries_bytes)[0]
+
+    passed_verification = 0
+    failed_verification = 0
+    for i in range(num_entries):
+        sha256len = 32
+        hash_bytes = verify_file.read(sha256len)
+        if len(hash_bytes) != sha256len:
+            failed_verification += 1
+            print(f"Missing hash for file {i}")
+            continue
+
+        folders, filename = RemoteServer.hash_to_filepath(hash_bytes)
+        full_file_path = os.path.join(out_file, folders, filename)
+        logging.debug(f"Need to verify contents of {full_file_path}")
+
+        file_hash = CryptoUtils.calc_local_file_hash(full_file_path)
+
+        if file_hash == hash_bytes:
+            logging.debug(f"Verified contents of {full_file_path}")
+            passed_verification +=1
+        else:
+            logging.debug(f"Verification failed of {full_file_path}")
+            failed_verification += 1
+
+    print(f"NUM_FILES={num_entries}")
+    print(f"PASSED={passed_verification}")
+    print(f"FAILED={failed_verification}")
+
+
+
 def print_usage(self_name, tool_list):
     print(f"Usage {self_name} tool infile outfile")
 
@@ -199,7 +237,9 @@ def main(args):
                   ( "compress", compress_tool, "Compress a file using bzip compression" ),
                   ( "decompress", decompress_tool, "Decompress a file using bzip compression"),
                   ( "compress_crypt_send", compress_crypt_send, "Compress, crypt, and send" ),
-                  ( "verify_file_backed_up", verify_file_backed_up, "Verify the presence of backup file on server") ] 
+                  ( "verify_file_backed_up", verify_file_backed_up, "Verify the presence of backup file on server"),
+                  ( "manifest_verify", manifest_verify, 
+                    "Verify an entire backup is correct and all files present from .verify file") ] 
 
 
     if len(args) != 4:
