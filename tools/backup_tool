@@ -4,6 +4,7 @@ import sys
 import binascii
 import logging
 import os
+import glob
 
 from common_backup_utils import ConfigFile, BackupUtils, CryptoUtils
 
@@ -22,18 +23,11 @@ def main(args):
         ConfigFile.print_configuration_sample()
         return
 
+    bu.cache_last_backup_manifest()
+
     bu.get_file_list()
 
-    backup_dir = bu.config.get("LOCAL_PATH_TO_BACKUP")
-    logging.debug(f"backup_dir = {backup_dir}")
-    for pn in bu.file_list:
-        full_local_path = os.path.join(backup_dir, pn)
-        hb = CryptoUtils.calc_local_file_hash(full_local_path)
-        logging.debug(f"{pn}:{hb.hex()}")
-
-    
-
-    bu.first_backup()
+    bu.backup_files()
 
 
 if __name__ == "__main__":

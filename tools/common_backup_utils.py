@@ -9,6 +9,8 @@ import struct
 import stat
 import datetime
 import re
+import glob
+import binascii
 
 from typing import List, Tuple, Dict, Set
 
@@ -113,16 +115,81 @@ class BackupUtils:
         self.local_index_path = self.config.get("LOCAL_INDEX_PATH")
         self.name_prefix = self.config.get("BACKUP_FILENAME_PREFIX", "backup_")
 
-        self.pt_hash_cache: Dict [ bytes, bytes ] = {}
+        self.pt_hash_cache: Dict [ bytes, Tuple [ bytes, str ] ] = {}
 
         self.file_list: List [ str ] = []
 
-        self.filename_pt_hash: Dict [ str, bytes ]
+        #self.filename_pt_hash: Dict [ str, bytes ]
 
         self.logger = logging.getLogger("BackupUtil")
         self.timestamp =  datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-    def first_backup(self):
+    def cache_last_backup_manifest(self):
+        glob_pattern = self.local_index_path + "/" + self.name_prefix + "*.index"
+        logging.debug(f"Glab pattern: {glob_pattern}")
+        manifest_list = glob.glob(glob_pattern)
+        manifest_list.sort()
+        manifest_list.reverse()
+
+        logging.debug("Other manifests found")
+        for old_manifest in manifest_list:
+            logging.debug(f"Old: {old_manifest}")
+
+        if len(manifest_list) == 0:
+            return False
+
+        for manifest_path in manifest_list:
+            self.logger.debug(f"Attempting to load the manifest {manifest_path}")
+            success = self.load_manifest_info_cache(manifest_path)
+            if success:
+                return True
+
+        self.logger.warning("Exhausted all manifests without finding complete manifest")
+        return False
+
+    def load_manifest_info_cache(self, manifest_path) -> bool:
+        """ Returns true if we were successful in loading hash cache from manifest """
+        mf = open(manifest_path, "r")
+        first_line = mf.readline()
+        first_line_tokens = first_line.split("=")
+
+        if len(first_line_tokens) != 2 or first_line_tokens[0] != "NUM_FILES":
+            self.logger.error(f"Manifest {manifest_path} has invalid NUM_FILES line")
+            mf.close()
+            return False
+
+        num_files_reqd = int(first_line_tokens[1])
+
+        num_files_cached = 0
+        while True:
+            mfl = mf.readline()
+
+            if len(mfl) == 0:
+                break
+
+            # Remove any escaped colons
+            mfl.replace("::","")
+            tokens = mfl.split(":")
+            if len(tokens) < 4:
+                continue
+
+            pt_hash = binascii.unhexlify(tokens[1].strip())
+            compression_flag = tokens[2]
+            ct_hash = binascii.unhexlify(tokens[3].strip())
+
+            self.pt_hash_cache[pt_hash] = (ct_hash, compression_flag)
+            num_files_cached += 1
+
+        mf.close()
+
+        if num_files_cached != num_files_reqd:
+            # incomplete, don't trust it
+            self.logger.warning(f"Only {num_files_cached} of reqd {num_files_reqd} in {manifest_path}")
+            self.pt_hash_cache = {}
+            return False
+        return True
+
+    def backup_files(self):
         local_index_file_path = os.path.join(self.local_index_path, self.name_prefix + self.timestamp + ".index")
         local_verify_file_path = os.path.join(self.local_index_path, self.name_prefix + self.timestamp + ".verify")
 
@@ -134,40 +201,70 @@ class BackupUtils:
 
         # Write the number of files in the backup to the index and verify file
         local_index_file.write(f"NUM_FILES={len(self.file_list)}\n")
-        local_verify_file.write(struct.pack(">I", len(self.file_list)))
+
+        # We need to write num of empty files, but don't know yet
+        local_verify_file.write(struct.pack(">II", len(self.file_list), 0))
 
         rs = RemoteServer(self.server_hostname, self.server_username, self.server_remote_folder)
+        
+        num_files_txfered = 0
+        num_files_found_in_cache = 0
+        num_empty_files = 0
 
         for fn in self.file_list:
             cur_local_full_path = os.path.join(self.backup_path_normal, fn)
-            local_file_hash = CryptoUtils.calc_local_file_hash(cur_local_full_path)
+            local_file_hash, local_file_len = CryptoUtils.calc_local_file_hash(cur_local_full_path)
 
-            dontCompress = False
-            try:
-                file_ext_start = fn.rindex('.')
-                ext = fn[file_ext_start:]
-                logging.debug(f"ext searching for {ext}")
-                if ext in BackupUtils.no_compress_ext_list:
-                    dontCompress = True
-            except:
-                logging.debug(f"Filename {fn} has no extension")
-                pass
+            if local_file_len == 0:
+                # Empty file, special case, just index it
+                compression_flag = "0"
+                ct_hash = b'\x00' * CryptoUtils.hash_size
+                num_empty_files += 1
 
-            if dontCompress:
-                hash_value, total_bytes_read, total_bytes_written = rs.crypt_txfer(self.key, cur_local_full_path)
+            # is this in the hash cache
+            elif local_file_hash in self.pt_hash_cache:
+                # This file has already been backed up previously
+                ct_hash, compression_flag = self.pt_hash_cache[local_file_hash]
+
+                dontCompress = True if compression_flag == "N" else False
+                logging.debug(f"File {fn} is in hash cache / previously backed up")
+                num_files_found_in_cache += 1
             else:
-                hash_value, total_bytes_read, total_bytes_written = rs.compress_crypt_txfer(self.key, cur_local_full_path)
+                # New file, must back this up
+            
+                compression_flag = 'b' # bzip2
+                try:
+                    file_ext_start = fn.rindex('.')
+                    ext = fn[file_ext_start:]
+                    logging.debug(f"ext searching for {ext}")
+                    if ext in BackupUtils.no_compress_ext_list:
+                        compression_flag = "N" # no compression
+                except:
+                    logging.debug(f"Filename {fn} has no extension")
+                    pass
+
+                if compression_flag == "N":
+                    ct_hash, total_bytes_read, total_bytes_written = rs.crypt_txfer(self.key, cur_local_full_path)
+                else:
+                    ct_hash, total_bytes_read, total_bytes_written = rs.compress_crypt_txfer(self.key, cur_local_full_path)
+            
+                num_files_txfered += 1
 
             index_entry_list = []
             index_entry_list.append(fn.replace(":", "::"))
             index_entry_list.append(local_file_hash.hex())
-            index_entry_list.append("N" if dontCompress else "b")
-            index_entry_list.append(hash_value.hex())
+            index_entry_list.append(compression_flag)
+            index_entry_list.append(ct_hash.hex())
             
             escaped_filename = fn.replace(":","::")
             local_index_file.write(":".join(index_entry_list) + "\n")
-            local_verify_file.write(hash_value)
+            if local_file_len != 0:
+                local_verify_file.write(ct_hash)
 
+        # All the data written to the verify files, excecpt we have to go back and write num empty files
+        local_verify_file.seek(4)
+        local_verify_file.write(struct.pack(">I", num_empty_files))
+        
         local_index_file.close()
         local_verify_file.close()
 
@@ -180,6 +277,8 @@ class BackupUtils:
         rs.simple_compress_crypt_txfer(self.key, local_index_file_path, remote_index_file_path)
         rs.simple_txfer(local_verify_file_path, remote_verify_file_path)
 
+        print(f"{num_empty_files} empty files not transfered, only in index")
+        print(f"{num_files_found_in_cache} skipped txfer (already backed-up), {num_files_txfered} files transfered")
             
     def get_file_list(self):
         """
@@ -203,7 +302,8 @@ class BackupUtils:
 
 class CryptoUtils:
     chunkSize = 16 * 1024 * 1024 # 16MB
-    
+    hash_size = 32
+
     @classmethod
     def deriveKey(cls, crypt_pass: str) -> bytes:
         # Fixed salt
@@ -212,20 +312,22 @@ class CryptoUtils:
         return scrypt(crypt_pass, salt, 64, N=2**20, r=8, p=1)
 
     @classmethod
-    def calc_local_file_hash(cls, filename: str):
+    def calc_local_file_hash(cls, filename: str) -> Tuple [bytes, int ]:
+        """ Returns the hash and file length """
         hash_ctx = SHA256.new()
 
         input_file = open(filename, "rb")
-        
+        file_len = 0
         while(True):
             chunk = input_file.read(CryptoUtils.chunkSize)
+            file_len += len(chunk)
 
             if len(chunk):
                 hash_ctx.update(chunk)
             else:
                 # We are at the end of the file
                 input_file.close()
-                return hash_ctx.digest()
+                return hash_ctx.digest(), file_len
 
     @classmethod
     def encryptBytes(cls, key: bytes, inbytes: bytes):

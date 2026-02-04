@@ -2,22 +2,37 @@
 
 Trust-no-one Encrypted Backup Offsite With Verification
 
-# Format of local index
+# Index
+
+This file is plaintext and has the mapping of filenames to the plaintext and
+cipher text hashes.  It also has a flag to tell you if the cipher text was
+compressed, or if the file was empty (and thus we don't backup).
+
+This file will be kept locally, you can use the index to find duplicate files
+in your tree.
+
+This file also gets compressed and encrypted and stored with the backup files
+so that in the event of a total failure of local storage, you can restore
+the backups and their corresponding filenames.  I wouldn't even decrypt this
+file remotely, or on cloud systems.  Copy it to local trusted system before
+extracting the contents of it.
 
 ```
 NUM_FILES=
-DATE=
 pathname:hash:flag:ct_hash
 ```
 
 * NUM_FILES so we can tell if the index was completely written or was cut off before completion
-* DATE: informational purposes.  Not sure format will even matter
 * pathname will ignore newlines.  colons in filenames will be escaped as double colons in the pathname
 * hash will be sha256 sum
 * flag will be the following:
   * N for no compression
-  * g for gzip
+  * g for gzip (not used)
+  * 0 for empty file
+  * b for bzip2
 * ct_hash will be sha256 sum
+
+# Format of verify index
 
 # Encoding of cipher text
 
@@ -40,9 +55,9 @@ reduce the size of archive data.
    hashes need to be copied to the backup server, and our new index file.
 6. When files are transfered to offline backup server they are optionally
    compressed, encrypted, and the file name is based on the hash of the
-   ciphertext.  The name will be /aa/bb/cc/xxxxx...xxx where aa, bb, and
-   cc are the first bytes of the hash (creating a folder structure on the
-   backup server with up to 256 subdirectories in each folder
+   ciphertext.  The name will be /aa/bb/xxxxx...xxx where aa, and bb, are
+   the first bytes of the hash (creating a folder structure on the backup
+   server with up to 256 subdirectories in each folder
 7. A verification service on the backup server should periodically run to
    verify that the files in each index still match the hash of their path
    name
@@ -65,9 +80,16 @@ Config file will be a list of key/value pairs
 * BACKUP_SERVER: rsync will be used to transfer file to the backup server
 * BACKUP_SERVER_USER: username for backup server user
 * BACKUP_SERVER_BACKUP_PATH: path to put backup files
-* BACKUP_SERVER_INDEX_PATH: path to put the index files
+* BACKUP_SERVER_REL_INDEX_PATH: path to put the index files
 * LOCAL_INDEX_PATH: path where we should store index files
 * LOCAL_PATH_TO_BACKUP: path to the files locally we want backed up
+* ENCRYPT_PASSWORD: password to encrypt backups with
+
+Optional config entries
+
+* BACKUP_FILENAME_PREFIX: Prefix that gets added to beginning of index
+  and verify files before backup timestamp
+* BACKUP_SERVER_REL_INDEX_PATH: path to put the index files
 
 @todo Make port customizable
 
@@ -77,3 +99,18 @@ Config file will be a list of key/value pairs
 * verify_backup_index config_file
 * send_latest_index_to_server config_file
 
+# Todo List
+
+[ ] Make SSH port customizable
+[ ] Make SSH able to go through a jump box / SSH hop
+[ ] Make backup verify the integrity of the last backup cache before
+    backing up
+[ ] Make some cron utilities
+    [ ] Run the backup process, log, email on failures
+    [ ] Run the verification process, log, email on failures
+[ ] Make some restore programs
+    [ ] Restore single file
+    [ ] Restore an entire backup
+    [ ] Delete a backup (deconflict files with all other backups)
+[ ] Make a functional test 
+[ ] Better built-in help

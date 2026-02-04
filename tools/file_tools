@@ -186,16 +186,15 @@ def verify_file_backed_up(in_file, out_file):
 def manifest_verify(in_file, out_file):
     logging.debug(f"Path to backup data = {out_file}")
     verify_file = open(in_file, "rb")
-    num_entries_len = struct.calcsize(">I")
+    num_entries_len = struct.calcsize(">II")
     num_entries_bytes = verify_file.read(num_entries_len)
-    num_entries = struct.unpack(">I", num_entries_bytes)[0]
+    num_entries, num_zero_len = struct.unpack(">II", num_entries_bytes)
 
     passed_verification = 0
     failed_verification = 0
-    for i in range(num_entries):
-        sha256len = 32
-        hash_bytes = verify_file.read(sha256len)
-        if len(hash_bytes) != sha256len:
+    for i in range(num_entries - num_zero_len):
+        hash_bytes = verify_file.read(CryptoUtils.hash_size)
+        if len(hash_bytes) != CryptoUtils.hash_size:
             failed_verification += 1
             print(f"Missing hash for file {i}")
             continue
@@ -204,7 +203,12 @@ def manifest_verify(in_file, out_file):
         full_file_path = os.path.join(out_file, folders, filename)
         logging.debug(f"Need to verify contents of {full_file_path}")
 
-        file_hash = CryptoUtils.calc_local_file_hash(full_file_path)
+        try:
+            file_hash, file_len = CryptoUtils.calc_local_file_hash(full_file_path)
+        except Exception as e:
+            logging.debug(f"Exception during hashing of {full_file_path}")
+            failed_verification += 1
+            continue
 
         if file_hash == hash_bytes:
             logging.debug(f"Verified contents of {full_file_path}")
@@ -214,6 +218,7 @@ def manifest_verify(in_file, out_file):
             failed_verification += 1
 
     print(f"NUM_FILES={num_entries}")
+    print(f"NUM_ZERO_LEN={num_zero_len}")
     print(f"PASSED={passed_verification}")
     print(f"FAILED={failed_verification}")
 
