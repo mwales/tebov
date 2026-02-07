@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+# For Ubuntu, we need the following packages installed
+# python3-argcomplete python3-paramiko
+
 import sys
 #import crypt
 import binascii
@@ -10,26 +13,37 @@ import paramiko
 import logging
 import stat
 import os
+import argparse
+import getpass
+
+import argcomplete 
+import paramiko
 
 from common_backup_utils import ConfigFile, BackupUtils, CryptoUtils, RemoteServer
 
+
 def password_double_prompt():
     print("Enter password:")
-    password = input()
+    password = getpass.getpass()
     print("Enter password again:")
-    password2 = input()
+    password2 = getpass.getpass()
     if password != password2:
         print("Passwords don't match")
         return None
     return password
 
 
-def encrypt_tool(in_path, out_path):
-    ptf = open(in_path, "rb")
-    ctf = open(out_path, "wb")
+def encrypt_mode(args):
+    ptf = args.pt_path
+    ctf = args.ct_path
 
-    password = password_double_prompt()
+    if args.password:
+        password = args.password
+    else:
+        password = password_double_prompt()
+
     if not password:
+        sys.stderr.write("Error with password\n")
         return
 
     key = CryptoUtils.deriveKey(password)
@@ -51,12 +65,16 @@ def encrypt_tool(in_path, out_path):
     ptf.close()
     ctf.close()
 
-def decrypt_tool(in_path, out_path):
-    ctf = open(in_path, "rb")
-    ptf = open(out_path, "wb")
+def decrypt_mode(args):
+    ctf = args.ct_path
+    ptf = args.pt_path
 
-    print("Enter password:")
-    password = input()
+    if args.password:
+        password = args.password
+    else:
+        print("Enter password:")
+        password = getpass.getpass
+
     key = CryptoUtils.deriveKey(password)
 
     while True:
@@ -78,10 +96,10 @@ def decrypt_tool(in_path, out_path):
     ptf.close()
     ctf.close()
 
-def compress_tool(in_path, out_path):
-    in_file = open(in_path, "rb")
-    out_file = open(out_path, "wb")
-    
+def compress_mode(args):
+    in_file = args.in_path
+    out_file = args.out_path
+
     compressor = bz2.BZ2Compressor()
 
     chunk_size = 16 * 1024 * 1024
@@ -103,13 +121,12 @@ def compress_tool(in_path, out_path):
     out_file.write(bc)
     in_file.close()
     out_file.close()
-    print(f"Compressed {in_path} from {uncompress_size} down to {compress_size} in {out_path}")
+    print(f"Compressed {in_file.name} from {uncompress_size} down to {compress_size} in {out_file.name}")
 
-
-def decompress_tool(in_path, out_path):
-    in_file = open(in_path, "rb")
-    out_file = open(out_path, "wb")
-    
+def decompress_mode(args):
+    in_file = args.in_path
+    out_file = args.out_path
+   
     decompressor = bz2.BZ2Decompressor()
 
     chunk_size = 16 * 1024 * 1024
@@ -130,7 +147,7 @@ def decompress_tool(in_path, out_path):
 
     in_file.close()
     out_file.close()
-    print(f"Decompressed {in_path} from {compress_size} up to {uncompress_size} in {out_path}")
+    print(f"Decompressed {in_file.name} from {compress_size} up to {uncompress_size} in {out_file.name}")
 
 def parse_remote(s: str):
     """ Returns a tuple that is ( user, host, path ) """
@@ -141,32 +158,40 @@ def parse_remote(s: str):
 
     return ( m.group(1), m.group(2), m.group(3) )
 
-def compress_crypt_send(in_file, out_file):
+def backup_file_mode(args):
 
-    password = password_double_prompt()
+    if args.password:
+        password = args.password
+    else:
+        password = password_double_prompt()
+
     if not password:
+        sys.stderr.write("Error with password\n")
         return
 
-    username, hostname, path = parse_remote(out_file)
+    username, hostname, path = parse_remote(args.dest_scp_folder)
 
     key = CryptoUtils.deriveKey(password)
 
     rs = RemoteServer(hostname, username, path)
 
-    hashdigest, br, bw = rs.compress_crypt_txfer(key, in_file)
+    hashdigest, br, bw = rs.compress_crypt_txfer(key, args.in_file)
 
     rs.close()
 
     print(f"Compressed {br} bytes down into {bw}, encrypted file hash = {hashdigest.hex()}")
 
-def verify_file_backed_up(in_file, out_file):
-    print("Enter password:")
-    password = input()
+def verify_single_file_mode(args):
+    if args.password:
+        password = args.password
+    else:
+        print("Enter password:")
+        password = getpass.getpass
  
     key = CryptoUtils.deriveKey(password)
-    hash_val, file_len = CryptoUtils.compute_compress_crypt_hash(in_file, key)
+    hash_val, file_len = CryptoUtils.compute_compress_crypt_hash(args.in_file, key)
     
-    username, hostname, path = parse_remote(out_file)
+    username, hostname, path = parse_remote(args.dest_scp_folder)
 
     folder, filename = RemoteServer.hash_to_filepath(hash_val)
 
@@ -183,24 +208,24 @@ def verify_file_backed_up(in_file, out_file):
         print(f"Should exist at {folder}/{filename}")
 
 
-def manifest_verify(in_file, out_file):
-    logging.debug(f"Path to backup data = {out_file}")
-    verify_file = open(in_file, "rb")
+def verify_manifest_mode(args):
+    manifest_file = args.manifest
+    logging.debug(f"Path to backup data = {args.backup_folder}")
     num_entries_len = struct.calcsize(">II")
-    num_entries_bytes = verify_file.read(num_entries_len)
+    num_entries_bytes = manifest_file.read(num_entries_len)
     num_entries, num_zero_len = struct.unpack(">II", num_entries_bytes)
 
     passed_verification = 0
     failed_verification = 0
     for i in range(num_entries - num_zero_len):
-        hash_bytes = verify_file.read(CryptoUtils.hash_size)
+        hash_bytes = manifest_file.read(CryptoUtils.hash_size)
         if len(hash_bytes) != CryptoUtils.hash_size:
             failed_verification += 1
             print(f"Missing hash for file {i}")
             continue
 
         folders, filename = RemoteServer.hash_to_filepath(hash_bytes)
-        full_file_path = os.path.join(out_file, folders, filename)
+        full_file_path = os.path.join(args.backup_folder, folders, filename)
         logging.debug(f"Need to verify contents of {full_file_path}")
 
         try:
@@ -224,45 +249,60 @@ def manifest_verify(in_file, out_file):
 
 
 
-def print_usage(self_name, tool_list):
-    print(f"Usage {self_name} tool infile outfile")
-
-    for tool, _, tool_help in tool_list:
-        print(f"    {tool}: {tool_help}")
-    print("")
- 
-
-
-
 def main(args):
     logging.basicConfig(level=logging.DEBUG)
 
-    tool_list = [ ( "encrypt", encrypt_tool, "Encrypt a file using AES-SIV" ),
-                  ( "decrypt", decrypt_tool, "Decrypt a file using AES-SIV" ),
-                  ( "compress", compress_tool, "Compress a file using bzip compression" ),
-                  ( "decompress", decompress_tool, "Decompress a file using bzip compression"),
-                  ( "compress_crypt_send", compress_crypt_send, "Compress, crypt, and send" ),
-                  ( "verify_file_backed_up", verify_file_backed_up, "Verify the presence of backup file on server"),
-                  ( "manifest_verify", manifest_verify, 
-                    "Verify an entire backup is correct and all files present from .verify file") ] 
+    tebov_parser = argparse.ArgumentParser(prog="tebov",
+                                           description="Performs Trust-no-one Encrypted Backups Offsite with Verification")
+    op_mode_parsers = tebov_parser.add_subparsers(dest="command", required=True, help="Mode of operation for tebov")
 
+    encrypt_mode_parser = op_mode_parsers.add_parser("encrypt", help="Encrypts a single file")
+    encrypt_mode_parser.add_argument("pt_path", type=argparse.FileType("rb"), help="path to plaintext file to be encrypted")
+    encrypt_mode_parser.add_argument("ct_path", type=argparse.FileType("wb"), help="path to where ciphertext should be stored")
+    encrypt_mode_parser.add_argument("--password", type=str, help="password for encryption (discouraged)")
+    encrypt_mode_parser.set_defaults(func=encrypt_mode)
+    
+    decrypt_mode_parser = op_mode_parsers.add_parser("decrypt", help="Decrypts a single file")
+    decrypt_mode_parser.add_argument("ct_path", type=argparse.FileType("rb"), help="path to ciphertext to be decrypted")
+    decrypt_mode_parser.add_argument("pt_path", type=argparse.FileType("wb"), help="path to where plaintext should be stored")
+    decrypt_mode_parser.add_argument("--password", type=str, help="password for decryption (discouraged)")
+    decrypt_mode_parser.set_defaults(func=decrypt_mode)
 
-    if len(args) != 4:
-        print_usage(sys.argv[0], tool_list)
-        return
+    compress_mode_parser = op_mode_parsers.add_parser("compress", help="Compresses a single file")
+    compress_mode_parser.add_argument("in_path", type=argparse.FileType("rb"), help="path to file to be compressed")
+    compress_mode_parser.add_argument("out_path", type=argparse.FileType("wb"), help="path to where compressed file should be stored")
+    compress_mode_parser.set_defaults(func=compress_mode)
+ 
+    decompress_mode_parser = op_mode_parsers.add_parser("decompress", help="Decompresses a single file")
+    decompress_mode_parser.add_argument("in_path", type=argparse.FileType("rb"), help="path to file to be decompressed")
+    decompress_mode_parser.add_argument("out_path", type=argparse.FileType("wb"), help="path to where decompressed file should be stored")
+    decompress_mode_parser.set_defaults(func=decompress_mode)
+ 
+    backup_single_mode_parser = op_mode_parsers.add_parser("backup_file", help="Backups a single file by compressing, encrypting, and SFTPing.")
+    backup_single_mode_parser.add_argument("in_file", type=str, help="path to plaintext file to be backed up")
+    backup_single_mode_parser.add_argument("dest_scp_folder", type=str,
+                                  help="Where to send the file (filename is generated). Ex: user@host:/path/to/folder")
+    backup_single_mode_parser.add_argument("--password", type=str, help="password for encryption (discouraged)")
+    backup_single_mode_parser.set_defaults(func=backup_file_mode)
 
-    tool_name = args[1]
-    in_path = args[2]
-    out_path = args[3]
+    verify_file_mode_parser = op_mode_parsers.add_parser("verify_file", help="Verifies a single file has been backed up")
+    verify_file_mode_parser.add_argument("in_file", type=str, help="path to plaintext file to be verified")
+    verify_file_mode_parser.add_argument("dest_scp_folder", type=str, help="Folder where backups sent. Ex: user@host:/path/to/folder")
+    verify_file_mode_parser.add_argument("--password", type=str, help="password for encryption (discouraged)")
+    verify_file_mode_parser.set_defaults(func=verify_single_file_mode)
 
+    verify_manifest_mode_parser = op_mode_parsers.add_parser("verify_manifest", help="Verifies a single manifest has been backed up (locally)")
+    verify_manifest_mode_parser.add_argument("manifest", type=argparse.FileType("rb"), help="path to manifest file to be verified")
+    verify_manifest_mode_parser.add_argument("backup_folder", type=str, help="Folder where backups stored (local path)")
+    verify_manifest_mode_parser.set_defaults(func=verify_manifest_mode)
+    
 
-    for tool, tool_func, _ in tool_list:
-        if tool == tool_name:
-            tool_func(in_path, out_path)
-            return 0
-    else:
-        print_usage(sys.argv[0], tool_list)
-       
+    argcomplete.autocomplete(tebov_parser)
+    args = tebov_parser.parse_args()
+
+    args.func(args)
+
+      
 
 if __name__ == "__main__":
     main(sys.argv)

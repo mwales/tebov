@@ -101,6 +101,7 @@ Optional config entries
 
 # Todo List
 
+
 [ ] Make SSH port customizable
 [ ] Make SSH able to go through a jump box / SSH hop
 [ ] Make backup verify the integrity of the last backup cache before
@@ -113,4 +114,4 @@ Optional config entries
     [ ] Restore an entire backup
     [ ] Delete a backup (deconflict files with all other backups)
 [ ] Make a functional test 
-[ ] Better built-in help
+[X] Better built-in help (argparse)
